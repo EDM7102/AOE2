@@ -38,7 +38,8 @@ FRIENDS: Dict[str, int] = {
     "rollthedice": 10775508,
 }
 
-AOE_API_BASE = "https://aoe2insights.com/api"
+# aoe2insights – kein offiziell dokumentiertes API, daher alles "Best Effort"
+AOE_API_BASE = "https://www.aoe2insights.com/api"
 CHECK_INTERVAL = 60  # Sekunden für Auto-Check
 
 # ===================== LOGGING =====================
@@ -61,23 +62,30 @@ last_ratings: Dict[str, Optional[int]] = {name: None for name in FRIENDS}
 streaks: Dict[str, int] = {name: 0 for name in FRIENDS}
 
 
-# ===================== API HELFER =====================
+# ===================== HELPER =====================
+
+def profile_url(player_name: str) -> str:
+    pid = FRIENDS[player_name]
+    # Normaler Profil-Link auf aoe2insights
+    return f"https://www.aoe2insights.com/user/{pid}/"
+
 
 def fetch_last_match(player_id: int) -> Optional[Dict[str, Any]]:
     """
     Holt das letzte Match eines Spielers.
-    /api/player/<id>/lastmatch/
+    /api/player/<id>/lastmatch/ – kann 404/500 liefern.
     """
     url = f"{AOE_API_BASE}/player/{player_id}/lastmatch/"
     try:
         r = requests.get(url, timeout=8)
         r.raise_for_status()
         data = r.json()
+        return data.get("match")
+    except requests.HTTPError as e:
+        logger.error(f"HTTP-Fehler bei fetch_last_match({player_id}): {e}")
     except Exception as e:
-        logger.error(f"Fehler bei fetch_last_match({player_id}): {e}")
-        return None
-
-    return data.get("match")
+        logger.error(f"Allgemeiner Fehler bei fetch_last_match({player_id}): {e}")
+    return None
 
 
 def fetch_recent_matches(player_id: int, limit: int = 5) -> List[Dict[str, Any]]:
@@ -95,8 +103,11 @@ def fetch_recent_matches(player_id: int, limit: int = 5) -> List[Dict[str, Any]]
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
+    except requests.HTTPError as e:
+        logger.error(f"HTTP-Fehler bei fetch_recent_matches({player_id}): {e}")
+        return []
     except Exception as e:
-        logger.error(f"Fehler bei fetch_recent_matches({player_id}): {e}")
+        logger.error(f"Allgemeiner Fehler bei fetch_recent_matches({player_id}): {e}")
         return []
 
     matches = data.get("matches") or data.get("results") or data.get("data") or []
@@ -201,7 +212,18 @@ def format_match_end(player_name: str, match: Dict[str, Any], before: Optional[i
     return "\n".join(lines)
 
 
-def format_live_status(player_name: str, match: Dict[str, Any]) -> str:
+def format_live_status(player_name: str, match: Optional[Dict[str, Any]]) -> str:
+    """
+    Live-Status oder Fallback-Text, wenn kein Match/keine Daten.
+    """
+    if not match:
+        return (
+            f"📡 Live-Status für {player_name}\n"
+            f"Zurzeit konnten keine Matchdaten von AoE2Insights geladen werden.\n"
+            f"Entweder existiert noch kein Match oder die Seite liefert gerade 404/500.\n\n"
+            f"🔗 Direktes Profil: {profile_url(player_name)}"
+        )
+
     pid = FRIENDS[player_name]
     map_name = match.get("map", {}).get("name", "Unbekannt")
     started = match.get("started")
@@ -222,13 +244,15 @@ def format_live_status(player_name: str, match: Dict[str, Any]) -> str:
         lines.append(f"⭐ Aktuelles Elo (Matchdaten): {rating}")
     if started:
         lines.append(f"⏱ Start: {started}")
+    lines.append(f"🔗 Profil: {profile_url(player_name)}")
 
     return "\n".join(lines)
 
 
 def format_basic_stats(player_name: str, last_match: Optional[Dict[str, Any]]) -> str:
     """
-    Zeigt Basic Stats auf Basis des letzten Matches + Streak.
+    Zeigt Basic Stats auf Basis des letzten Matches + Streak,
+    oder Fallback, wenn last_match=None.
     """
     pid = FRIENDS[player_name]
 
@@ -258,20 +282,34 @@ def format_basic_stats(player_name: str, last_match: Optional[Dict[str, Any]]) -
     lines = [
         f"📊 Basic Stats für {player_name}",
         f"⭐ Elo (zuletzt bekannt): {rating_text}",
-        f"🗺 Letzte Map: {map_name}",
     ]
-    if civ:
-        lines.append(f"🧬 Letzte Civ: {civ}")
-    if started:
-        lines.append(f"⏱ Letztes Match: {started}")
+
+    if last_match:
+        lines.append(f"🗺 Letzte Map: {map_name}")
+        if civ:
+            lines.append(f"🧬 Letzte Civ: {civ}")
+        if started:
+            lines.append(f"⏱ Letztes Match: {started}")
+    else:
+        lines.append(
+            "ℹ️ Es konnten keine Matchdaten geladen werden "
+            "(AoE2Insights-API gibt vermutlich 404/500 zurück)."
+        )
+
     lines.append(f"📈 Streak: {streak_text}")
+    lines.append(f"🔗 Profil: {profile_url(player_name)}")
 
     return "\n".join(lines)
 
 
 def format_history(player_name: str, matches: List[Dict[str, Any]]) -> str:
     if not matches:
-        return f"Keine Match-History für {player_name} gefunden."
+        return (
+            f"📜 Match-History – {player_name}\n\n"
+            f"Zurzeit konnten keine Matchdaten von AoE2Insights geladen werden "
+            f"(leere Antwort oder API-Fehler).\n\n"
+            f"🔗 Schau direkt auf AoE2Insights nach:\n{profile_url(player_name)}"
+        )
 
     pid = FRIENDS[player_name]
     lines = [f"📜 Letzte Matches – {player_name}"]
@@ -292,6 +330,7 @@ def format_history(player_name: str, matches: List[Dict[str, Any]]) -> str:
 
         lines.append(line)
 
+    lines.append(f"\n🔗 Mehr Details: {profile_url(player_name)}")
     return "\n".join(lines)
 
 
@@ -358,6 +397,7 @@ async def check_friends(context: ContextTypes.DEFAULT_TYPE) -> None:
         before = rating_before_match.get(name)
 
         if not match:
+            # keine Daten – nichts schicken
             continue
 
         ongoing = match.get("ongoing", False)
@@ -415,11 +455,13 @@ async def check_friends(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "👋 AoE2 Insights Bot V2 ist aktiv.\n\n"
-        "Ich tracke automatisch Matches von:\n"
+        "Ich tracke (soweit AoE2Insights Daten liefert) Matches von:\n"
         "• EDM7101\n"
         "• JustForFun\n"
         "• rollthedice\n\n"
-        "Nutze das Menü unten für Live-Status, Stats, History und Leaderboard."
+        "Nutze das Menü unten für Live-Status, Stats, History und Leaderboard.\n"
+        "Hinweis: Wenn AoE2Insights keine API-Daten liefert (404/500), "
+        "zeige ich dir stattdessen direkte Profil-Links an."
     )
     await update.message.reply_text(text, reply_markup=main_menu_keyboard())
 
@@ -491,10 +533,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if data == "menu_help":
         text = (
             "ℹ️ Hilfe\n\n"
-            "• Ich verwende aoe2insights.com, um eure Matches zu checken.\n"
-            "• Auto-Alerts bei Matchstart & Matchende\n"
-            "• Erkennung von Win-/Lose-Streaks\n"
-            "• Live-Status, Stats & History über das Menü.\n"
+            "• Ich versuche, über AoE2Insights (und deren undokumentierte API) "
+            "Matchdaten für deine Gruppe zu holen.\n"
+            "• Wenn die Seite 404/500 liefert, bekommst du statt Stats immerhin "
+            "direkte Links zu den Profilen.\n"
+            "• Auto-Alerts bei Matchstart/Matchende funktionieren nur, "
+            "wenn AoE2Insights die Daten rechtzeitig bereitstellt."
         )
         await query.edit_message_text(text, reply_markup=main_menu_keyboard())
         return
@@ -514,11 +558,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         if prefix == "live":
             match = fetch_last_match(pid)
-            if not match:
-                text = f"Für {name} wurde kein Match gefunden."
-            else:
-                text = format_live_status(name, match)
-
+            text = format_live_status(name, match)
             keyboard = InlineKeyboardMarkup(
                 [
                     [InlineKeyboardButton("🔄 Aktualisieren", callback_data=f"live|{name}")],
