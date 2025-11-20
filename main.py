@@ -6,6 +6,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram import Update
 import logging
 
+# ========================= CONFIG =========================
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
@@ -20,8 +22,11 @@ INSIGHTS_URL = "https://www.aoe2insights.com/user/{pid}/matches/"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Speichert die letzte bekannte Match-ID, um doppelte Nachrichten zu verhindern
 last_match_ids = {name: None for name in FRIENDS}
 
+
+# ========================= SCRAPING FUNKTIONEN =========================
 
 def scrape_last_match(player_id):
     """Holt das neueste Match über HTML Scraping."""
@@ -36,7 +41,6 @@ def scrape_last_match(player_id):
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # Match Rows finden
     table = soup.find("table", {"class": "table"})
     if not table:
         return None
@@ -59,6 +63,32 @@ def scrape_last_match(player_id):
 
     return data
 
+
+def get_current_elo(player_id):
+    """Liest nur Elo über Scraping aus."""
+    url = INSIGHTS_URL.format(pid=player_id)
+
+    try:
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+    except Exception as e:
+        logger.error(f"ELO Fehler: {e}")
+        return None
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    table = soup.find("table", {"class": "table"})
+    if not table:
+        return None
+
+    first_row = table.find("tr", {"class": "match-row"})
+    if not first_row:
+        return None
+
+    cells = first_row.find_all("td")
+    return cells[4].get_text(strip=True)
+
+
+# ========================= JOB: MATCH CHECK =========================
 
 async def check_matches(context: ContextTypes.DEFAULT_TYPE):
     bot = context.bot
@@ -96,15 +126,32 @@ async def check_matches(context: ContextTypes.DEFAULT_TYPE):
             last_match_ids[name] = None
 
 
+# ========================= COMMANDS =========================
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot aktiv! Ich überwache Matches über AoE2Insights-Scraping.")
 
+async def elo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "📊 *Aktuelle Elo-Werte:*\n\n"
+    for name, pid in FRIENDS.items():
+        elo = get_current_elo(pid)
+        if elo:
+            text += f"⭐ *{name}*: {elo}\n"
+        else:
+            text += f"⚠️ *{name}*: Keine Daten\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ========================= MAIN =========================
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("elo", elo_cmd))
 
+    # Auto-Matchcheck alle 15 Sekunden
     app.job_queue.run_repeating(check_matches, interval=15, first=5)
 
     app.run_polling()
