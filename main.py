@@ -1,6 +1,7 @@
 import os
 import logging
 import re
+import asyncio
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -21,7 +22,7 @@ from telegram.ext import (
 # ===================== CONFIG =====================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID_ENV = os.getenv("CHAT_ID")  # nur nötig, wenn du später Auto-Nachrichten willst
+CHAT_ID_ENV = os.getenv("CHAT_ID")  # aktuell nicht zwingend nötig
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN ist nicht gesetzt. Bitte als Environment Variable setzen.")
@@ -98,23 +99,17 @@ def scrape_player(player_id: int) -> PlayerProfile:
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    # Kompletter Text für einfache Regex/Sections
     full_text = soup.get_text(separator="\n")
 
     # Name und Game Id
-    # Wir wissen aus der Seite: "Game Id: 10770866" und kurz davor der Name.
     name = str(player_id)
     game_id = player_id
     country = None
 
-    # Versuche, "Game Id: <id>" Zeile zu finden
     lines = [line.strip() for line in full_text.splitlines()]
     for i, line in enumerate(lines):
         if f"Game Id: {player_id}" in line:
             game_id = player_id
-            # Der Name steht ein paar Zeilen darüber, z.B. "EDM7101"
-            # Wir gehen rückwärts und nehmen die erste nicht-leere Zeile,
-            # die nicht "aka." enthält.
             for j in range(i - 1, max(i - 5, -1), -1):
                 candidate = lines[j].strip()
                 if candidate and "aka." not in candidate:
@@ -122,7 +117,7 @@ def scrape_player(player_id: int) -> PlayerProfile:
                     break
             break
 
-    # Rankings extrahieren
+    # Rankings
     ladder = LadderInfo()
     try:
         idx_rank = full_text.index("Rankings")
@@ -130,13 +125,11 @@ def scrape_player(player_id: int) -> PlayerProfile:
     except ValueError:
         text_rank = ""
 
-    # 1v1 RM – Rating + ATH
     m_1v1 = re.search(r"1v1 RM.*?Rating\s+(\d+).*?All Time High:\s+(\d+)", text_rank, re.DOTALL)
     if m_1v1:
         ladder.rating_1v1_rm = int(m_1v1.group(1))
         ladder.ath_1v1_rm = int(m_1v1.group(2))
 
-    # Team RM – Rank + Rating + ATH
     m_team = re.search(
         r"Team RM.*?(?:#(\d+))?.*?Rating\s+(\d+).*?All Time High:\s+(\d+)",
         text_rank,
@@ -148,7 +141,7 @@ def scrape_player(player_id: int) -> PlayerProfile:
         ladder.rating_team_rm = int(m_team.group(2))
         ladder.ath_team_rm = int(m_team.group(3))
 
-    # About-Text (zwischen "About" und "Ratings")
+    # About-Text
     about_text = None
     fav_civ_line = None
     fav_map_line = None
@@ -162,58 +155,52 @@ def scrape_player(player_id: int) -> PlayerProfile:
         except ValueError:
             idx_after = idx_about + 1000
         about_block = full_text[idx_about:idx_after]
-        # Säubern
         about_lines = [l.strip() for l in about_block.splitlines() if l.strip()]
-        # Erste/nächste Zeilen nach "About" zusammenfügen als Text
         about_text = " ".join(about_lines[1:])
-        # Grobe Infos rausziehen:
-        # Gesamtmatches: "... record of playing 622 matches ..."
+
         m_tot = re.search(r"record of playing\s+(\d+)\s+matches", about_text)
         if m_tot:
             total_matches = int(m_tot.group(1))
 
-        # Lieblings-Civ: "chooses Romans as their favorite civilization, boasting a pick probability of 23.83%. EDM7101's proficiency ... win rate of 58.50% in 147 matches"
         m_civ = re.search(
             r"chooses\s+(.+?)\s+as their favorite civilization.*?pick probability of\s+([\d\.]+%)"
             r".*?win rate of\s+([\d\.]+%)\s+in\s+(\d+)\s+matches",
             about_text,
         )
         if m_civ:
-            fav_civ_line = f"{m_civ.group(1)} – {m_civ.group(3)} WR, {m_civ.group(2)} Pickrate ({m_civ.group(4)} Spiele)"
+            fav_civ_line = (
+                f"{m_civ.group(1)} – {m_civ.group(3)} WR, "
+                f"{m_civ.group(2)} Pickrate ({m_civ.group(4)} Spiele)"
+            )
 
-        # Lieblings-Map: "With a win rate of 60.24% across 83 matches, EDM7101 truly excels on the Black Forest map"
         m_map = re.search(
             r"win rate of\s+([\d\.]+%)\s+across\s+(\d+)\s+matches.*?excels on the\s+(.+?)\s+map",
             about_text,
         )
         if m_map:
-            fav_map_line = f"{m_map.group(3)} – {m_map.group(1)} WR ({m_map.group(2)} Spiele)"
+            fav_map_line = (
+                f"{m_map.group(3)} – {m_map.group(1)} WR ({m_map.group(2)} Spiele)"
+            )
 
-        # Beste Rolle: "boasting a win rate of 56.63% from 83 matches." + "flank position"
         m_role = re.search(
             r"dominates the\s+(.+?)\s+position.*?win rate of\s+([\d\.]+%)\s+from\s+(\d+)\s+matches",
             about_text,
         )
         if m_role:
-            fav_role_line = f"{m_role.group(1)} – {m_role.group(2)} WR ({m_role.group(3)} Spiele)"
+            fav_role_line = (
+                f"{m_role.group(1)} – {m_role.group(2)} WR ({m_role.group(3)} Spiele)"
+            )
     except ValueError:
         pass
 
-    # Letzte Matches: Bereich ab "Last matches"
+    # Letzte Matches
     last_matches: List[MatchInfo] = []
     try:
         idx_lm = full_text.index("Last matches")
         after_lm = full_text[idx_lm:]
         lm_lines_raw = [l.strip() for l in after_lm.splitlines()]
-        # Rausfiltern leerer Zeilen
         lm_lines = [l for l in lm_lines_raw if l]
 
-        # Wir suchen Sequenzen:
-        # mode
-        # map
-        # duration (enthält "m" oder "s")
-        # when (enthält "ago")
-        # match_id (beginnt mit "#")
         i = 0
         while i < len(lm_lines) - 4 and len(last_matches) < 6:
             mode = lm_lines[i]
@@ -307,7 +294,6 @@ def format_player_main_card(name: str, profile: PlayerProfile) -> str:
     if p.fav_role_line:
         lines.append(f"• Beste Rolle: {p.fav_role_line}")
 
-    # letztes Match
     if p.last_matches:
         lm = p.last_matches[0]
         lines.append("")
@@ -341,10 +327,9 @@ def format_player_matches(name: str, profile: PlayerProfile) -> str:
 
 
 def format_player_civs(name: str, profile: PlayerProfile) -> str:
-    # Wir nutzen hier die Infos aus dem About-Text.
     lines = [f"🧬 Civ-Überblick – {name}", ""]
     if profile.fav_civ_line:
-        lines.append(f"Top-Civ:")
+        lines.append("Top-Civ:")
         lines.append(f"• {profile.fav_civ_line}")
     else:
         lines.append("Keine Civ-Infos aus dem About-Text gefunden.")
@@ -352,7 +337,6 @@ def format_player_civs(name: str, profile: PlayerProfile) -> str:
     if profile.about_text:
         lines.append("")
         lines.append("Auszug aus 'About':")
-        # leicht kürzen
         snippet = profile.about_text
         if len(snippet) > 400:
             snippet = snippet[:400] + "..."
@@ -430,7 +414,6 @@ def group_stats_keyboard() -> InlineKeyboardMarkup:
 
 
 def group_matches_keyboard() -> InlineKeyboardMarkup:
-    # aktuell nur Platzhalter – wir nutzen die Player-Matches.
     buttons: List[List[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton("👤 EDM7101", callback_data="player_matches|EDM7101"),
@@ -450,7 +433,6 @@ def group_matches_keyboard() -> InlineKeyboardMarkup:
 
 # ===================== CACHING =====================
 
-# einfache In-Memory-Cache, damit wir nicht bei jedem Klick neu scrapen
 PROFILE_CACHE: Dict[str, PlayerProfile] = {}
 
 
@@ -476,16 +458,17 @@ def get_all_profiles() -> Dict[str, PlayerProfile]:
 # ===================== COMMAND HANDLER =====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Scrape alle Spieler (kann ein paar Sekunden dauern)
     await update.message.reply_text("⏳ Lade Daten von AoE2Insights...")
-    profiles = await context.application.run_in_executor(None, get_all_profiles)
+    loop = asyncio.get_running_loop()
+    profiles = await loop.run_in_executor(None, get_all_profiles)
 
     text = format_group_overview(profiles)
     await update.message.reply_text(text, reply_markup=start_keyboard())
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    profiles = await context.application.run_in_executor(None, get_all_profiles)
+    loop = asyncio.get_running_loop()
+    profiles = await loop.run_in_executor(None, get_all_profiles)
     text = format_group_overview(profiles)
     await update.message.reply_text(text, reply_markup=start_keyboard())
 
@@ -497,21 +480,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     data = query.data or ""
 
-    # Zurück zur Startseite
+    loop = asyncio.get_running_loop()
+
     if data == "back_start":
-        profiles = await context.application.run_in_executor(None, get_all_profiles)
+        profiles = await loop.run_in_executor(None, get_all_profiles)
         text = format_group_overview(profiles)
         await query.edit_message_text(text, reply_markup=start_keyboard())
         return
 
-    # Gruppen-Stats
     if data == "group|stats":
-        profiles = await context.application.run_in_executor(None, get_all_profiles)
+        profiles = await loop.run_in_executor(None, get_all_profiles)
         text = format_group_stats(profiles)
         await query.edit_message_text(text, reply_markup=group_stats_keyboard())
         return
 
-    # Gruppen-Matches (einfach Einstieg zu Player-Matches)
     if data == "group|matches":
         text = (
             "📜 Gruppen-Matches\n\n"
@@ -521,35 +503,32 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text(text, reply_markup=group_matches_keyboard())
         return
 
-    # Player-Hauptkarte
     if data.startswith("player|"):
         _, name = data.split("|", 1)
         if name not in FRIENDS:
             await query.edit_message_text("Unbekannter Spieler.", reply_markup=start_keyboard())
             return
-        profile = await context.application.run_in_executor(None, get_profile, name)
+        profile = await loop.run_in_executor(None, get_profile, name)
         text = format_player_main_card(name, profile)
         await query.edit_message_text(text, reply_markup=player_keyboard(name))
         return
 
-    # Player Matches
     if data.startswith("player_matches|"):
         _, name = data.split("|", 1)
         if name not in FRIENDS:
             await query.edit_message_text("Unbekannter Spieler.", reply_markup=start_keyboard())
             return
-        profile = await context.application.run_in_executor(None, get_profile, name)
+        profile = await loop.run_in_executor(None, get_profile, name)
         text = format_player_matches(name, profile)
         await query.edit_message_text(text, reply_markup=player_keyboard(name))
         return
 
-    # Player Civs
     if data.startswith("player_civs|"):
         _, name = data.split("|", 1)
         if name not in FRIENDS:
             await query.edit_message_text("Unbekannter Spieler.", reply_markup=start_keyboard())
             return
-        profile = await context.application.run_in_executor(None, get_profile, name)
+        profile = await loop.run_in_executor(None, get_profile, name)
         text = format_player_civs(name, profile)
         await query.edit_message_text(text, reply_markup=player_keyboard(name))
         return
