@@ -1,7 +1,8 @@
-import os
-import logging
-import re
+import argparse
 import asyncio
+import logging
+import os
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -21,11 +22,7 @@ from telegram.ext import (
 
 # ===================== CONFIG =====================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID_ENV = os.getenv("CHAT_ID")  # aktuell nicht zwingend nötig
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN ist nicht gesetzt. Bitte als Environment Variable setzen.")
 
 # Deine drei Spieler
 FRIENDS: Dict[str, int] = {
@@ -537,7 +534,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ===================== MAIN =====================
 
 def main() -> None:
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    parser = argparse.ArgumentParser(description="AoE2 Insights Telegram Bot")
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Scrape und drucke die Übersicht in die Konsole (ohne Telegram)",
+    )
+    parser.add_argument(
+        "--player",
+        choices=list(FRIENDS.keys()),
+        help="Optional nur einen Spieler im CLI-Modus scrapen",
+    )
+    args = parser.parse_args()
+
+    if args.cli:
+        if args.player:
+            profile = get_profile(args.player)
+            print(format_player_main_card(args.player, profile))
+            print()
+            print(format_player_matches(args.player, profile))
+        else:
+            profiles = get_all_profiles()
+            print(format_group_overview(profiles))
+        return
+
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        raise RuntimeError("BOT_TOKEN ist nicht gesetzt. Bitte als Environment Variable setzen.")
+
+    app = ApplicationBuilder().token(bot_token).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("menu", menu_command))
