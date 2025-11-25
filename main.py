@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import requests
+from requests.exceptions import RequestException
 from bs4 import BeautifulSoup
 from telegram import (
     Update,
@@ -92,8 +93,12 @@ def scrape_player(player_id: int) -> PlayerProfile:
     """
     url = profile_url(player_id)
     logger.info(f"Scrape {url}")
-    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        resp.raise_for_status()
+    except RequestException as exc:
+        logger.error("Fehler beim Abruf von %s: %s", url, exc)
+        raise RuntimeError(f"Konnte {url} nicht laden: {exc}") from exc
 
     soup = BeautifulSoup(resp.text, "html.parser")
     full_text = soup.get_text(separator="\n")
@@ -479,6 +484,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     loop = asyncio.get_running_loop()
 
+    async def load_profile(name: str) -> Optional[PlayerProfile]:
+        try:
+            return await loop.run_in_executor(None, get_profile, name)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Fehler beim Laden von %s: %s", name, exc)
+            await query.edit_message_text(
+                "⚠️ Konnte die Spielerdaten momentan nicht laden. Bitte später erneut versuchen.",
+                reply_markup=start_keyboard(),
+            )
+            return None
+
     if data == "back_start":
         profiles = await loop.run_in_executor(None, get_all_profiles)
         text = format_group_overview(profiles)
@@ -505,7 +521,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if name not in FRIENDS:
             await query.edit_message_text("Unbekannter Spieler.", reply_markup=start_keyboard())
             return
-        profile = await loop.run_in_executor(None, get_profile, name)
+        profile = await load_profile(name)
+        if profile is None:
+            return
         text = format_player_main_card(name, profile)
         await query.edit_message_text(text, reply_markup=player_keyboard(name))
         return
@@ -515,7 +533,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if name not in FRIENDS:
             await query.edit_message_text("Unbekannter Spieler.", reply_markup=start_keyboard())
             return
-        profile = await loop.run_in_executor(None, get_profile, name)
+        profile = await load_profile(name)
+        if profile is None:
+            return
         text = format_player_matches(name, profile)
         await query.edit_message_text(text, reply_markup=player_keyboard(name))
         return
@@ -525,7 +545,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if name not in FRIENDS:
             await query.edit_message_text("Unbekannter Spieler.", reply_markup=start_keyboard())
             return
-        profile = await loop.run_in_executor(None, get_profile, name)
+        profile = await load_profile(name)
+        if profile is None:
+            return
         text = format_player_civs(name, profile)
         await query.edit_message_text(text, reply_markup=player_keyboard(name))
         return
@@ -548,14 +570,18 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.cli:
-        if args.player:
-            profile = get_profile(args.player)
-            print(format_player_main_card(args.player, profile))
-            print()
-            print(format_player_matches(args.player, profile))
-        else:
-            profiles = get_all_profiles()
-            print(format_group_overview(profiles))
+        try:
+            if args.player:
+                profile = get_profile(args.player)
+                print(format_player_main_card(args.player, profile))
+                print()
+                print(format_player_matches(args.player, profile))
+            else:
+                profiles = get_all_profiles()
+                print(format_group_overview(profiles))
+        except Exception as exc:  # noqa: BLE001
+            print(f"Fehler beim Abrufen der Daten: {exc}")
+            raise SystemExit(1) from exc
         return
 
     bot_token = os.getenv("BOT_TOKEN")
