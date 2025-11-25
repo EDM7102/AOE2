@@ -34,6 +34,23 @@ FRIENDS: Dict[str, int] = {
 
 AOE_BASE_URL = "https://www.aoe2insights.com"
 
+# Request-Konfiguration (Proxies können bei restriktiven Umgebungen Probleme machen)
+SCRAPER_PROXIES: Optional[dict] = None
+
+
+def configure_scraper_proxy(proxy_url: Optional[str], disable_env_proxy: bool) -> None:
+    """Stellt die Proxy-Einstellungen für AoE2Insights-Anfragen ein."""
+    global SCRAPER_PROXIES  # noqa: PLW0603
+
+    if disable_env_proxy:
+        SCRAPER_PROXIES = {}
+        logger.info("Proxy-Umgebungsvariablen für Scrapes deaktiviert")
+    elif proxy_url:
+        SCRAPER_PROXIES = {"http": proxy_url, "https": proxy_url}
+        logger.info("Nutze konfigurierten Proxy für Scrapes: %s", proxy_url)
+    else:
+        SCRAPER_PROXIES = None  # requests nutzt Env-Variablen
+
 # ===================== LOGGING =====================
 
 logging.basicConfig(
@@ -240,7 +257,12 @@ def scrape_player(player_id: int) -> PlayerProfile:
     url = profile_url(player_id)
     logger.info(f"Scrape {url}")
     try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+            proxies=SCRAPER_PROXIES,
+        )
         resp.raise_for_status()
     except RequestException as exc:
         logger.error("Fehler beim Abruf von %s: %s", url, exc)
@@ -572,7 +594,20 @@ def main() -> None:
         choices=list(FRIENDS.keys()),
         help="Optional nur einen Spieler im CLI-Modus scrapen",
     )
+    parser.add_argument(
+        "--proxy",
+        help="Optionaler Proxy (http/https), falls Firewalls direkten Zugriff blocken",
+    )
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Proxy-Umgebungsvariablen für AoE2Insights-Requests deaktivieren",
+    )
     args = parser.parse_args()
+
+    proxy_url = args.proxy or os.getenv("SCRAPER_PROXY")
+    disable_env_proxy = args.no_proxy or os.getenv("SCRAPER_NO_PROXY") == "1"
+    configure_scraper_proxy(proxy_url=proxy_url, disable_env_proxy=disable_env_proxy)
 
     if args.cli:
         try:

@@ -6,6 +6,9 @@ if [[ -z "${BOT_TOKEN:-}" ]]; then
   exit 1
 fi
 
+# Optional: SCRAPER_PROXY="http://proxy:3128" setzen oder SCRAPER_NO_PROXY=1,
+# falls AoE2Insights nur ohne/via Proxy erreichbar ist.
+
 CHAT_ARG=()
 if [[ -n "${CHAT_ID:-}" ]]; then
   CHAT_ARG+=("CHAT_ID=${CHAT_ID}")
