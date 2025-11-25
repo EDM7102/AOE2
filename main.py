@@ -32,62 +32,6 @@ FRIENDS: Dict[str, int] = {
     "rollthedice": 10775508,
 }
 
-# Offline-Demo-HTMLs, damit das CLI auch ohne Internet lauffähig bleibt
-OFFLINE_HTML: Dict[int, str] = {
-    10770866: """
-    <html><body>
-    <h1>EDM7101</h1>
-    <div>Game Id: 10770866</div>
-    <div>Rankings</div>
-    <div>1v1 RM Rating 1499 All Time High: 1550</div>
-    <div>Team RM #321 Rating 1450 All Time High: 1500</div>
-    <div>About</div>
-    <p>EDM liebt schnelle Rushes und hat insgesamt eine record of playing 812 matches.</p>
-    <p>He chooses Byzantines as their favorite civilization with a pick probability of 41% and a win rate of 56% in 210 matches.</p>
-    <p>They show a win rate of 61% across 180 matches and excels on the Arabia map.</p>
-    <p>Player dominates the Pocket position with a win rate of 58% from 130 matches.</p>
-    <div>Ratings</div>
-    <div>Last matches</div>
-    <div>RM 1v1</div><div>Arabia</div><div>38:12</div><div>5 hours ago</div><div>#1234567</div>
-    <div>Team RM</div><div>Acropolis</div><div>32:01</div><div>1 day ago</div><div>#1234566</div>
-    </body></html>
-    """,
-    10769949: """
-    <html><body>
-    <h1>JustForFun</h1>
-    <div>Game Id: 10769949</div>
-    <div>Rankings</div>
-    <div>1v1 RM Rating 1320 All Time High: 1400</div>
-    <div>Team RM Rating 1340 All Time High: 1420</div>
-    <div>About</div>
-    <p>record of playing 640 matches.</p>
-    <p>chooses Mayans as their favorite civilization with a pick probability of 35% and a win rate of 52% in 180 matches.</p>
-    <p>win rate of 55% across 150 matches and excels on the Arena map.</p>
-    <p>dominates the Flank position with a win rate of 53% from 120 matches.</p>
-    <div>Ratings</div>
-    <div>Last matches</div>
-    <div>RM AUTOMATCH</div><div>Serengeti</div><div>29:44</div><div>3 hours ago</div><div>#2233445</div>
-    </body></html>
-    """,
-    10775508: """
-    <html><body>
-    <h1>rollthedice</h1>
-    <div>Game Id: 10775508</div>
-    <div>Rankings</div>
-    <div>1v1 RM Rating 1250 All Time High: 1330</div>
-    <div>Team RM #890 Rating 1360 All Time High: 1410</div>
-    <div>About</div>
-    <p>record of playing 410 matches.</p>
-    <p>chooses Vikings as their favorite civilization with a pick probability of 44% and a win rate of 57% in 170 matches.</p>
-    <p>win rate of 59% across 140 matches and excels on the Black Forest map.</p>
-    <p>dominates the Pocket position with a win rate of 60% from 100 matches.</p>
-    <div>Ratings</div>
-    <div>Last matches</div>
-    <div>RM 1v1</div><div>Four Lakes</div><div>31:20</div><div>2 hours ago</div><div>#8899771</div>
-    </body></html>
-    """,
-}
-
 AOE_BASE_URL = "https://www.aoe2insights.com"
 
 # ===================== LOGGING =====================
@@ -305,16 +249,6 @@ def scrape_player(player_id: int) -> PlayerProfile:
     return parse_player_html(resp.text, player_id)
 
 
-def scrape_player_offline(player_id: int) -> PlayerProfile:
-    html = OFFLINE_HTML.get(player_id)
-    if not html:
-        raise RuntimeError(
-            "Kein Offline-Datensatz verfügbar. Bitte Online-Modus oder einen bekannten Spieler wählen."
-        )
-    logger.info("Lade Offline-Daten für %s", player_id)
-    return parse_player_html(html, player_id)
-
-
 # ===================== FORMATTING =====================
 
 def format_group_overview(profiles: Dict[str, PlayerProfile]) -> str:
@@ -509,21 +443,20 @@ def group_matches_keyboard() -> InlineKeyboardMarkup:
 PROFILE_CACHE: Dict[str, PlayerProfile] = {}
 
 
-def get_profile(name: str, offline: bool = False) -> PlayerProfile:
-    cache_key = f"{name}-offline" if offline else name
-    if cache_key in PROFILE_CACHE:
-        return PROFILE_CACHE[cache_key]
+def get_profile(name: str) -> PlayerProfile:
+    if name in PROFILE_CACHE:
+        return PROFILE_CACHE[name]
     pid = FRIENDS[name]
-    profile = scrape_player_offline(pid) if offline else scrape_player(pid)
-    PROFILE_CACHE[cache_key] = profile
+    profile = scrape_player(pid)
+    PROFILE_CACHE[name] = profile
     return profile
 
 
-def get_all_profiles(offline: bool = False) -> Dict[str, PlayerProfile]:
+def get_all_profiles() -> Dict[str, PlayerProfile]:
     res: Dict[str, PlayerProfile] = {}
     for name in FRIENDS.keys():
         try:
-            res[name] = get_profile(name, offline=offline)
+            res[name] = get_profile(name)
         except Exception as e:
             logger.error(f"Fehler beim Scrapen für {name}: {e}")
     return res
@@ -639,22 +572,17 @@ def main() -> None:
         choices=list(FRIENDS.keys()),
         help="Optional nur einen Spieler im CLI-Modus scrapen",
     )
-    parser.add_argument(
-        "--offline",
-        action="store_true",
-        help="Nutze Offline-Demodaten statt Live-Abruf (hilfreich ohne Internet)",
-    )
     args = parser.parse_args()
 
     if args.cli:
         try:
             if args.player:
-                profile = get_profile(args.player, offline=args.offline)
+                profile = get_profile(args.player)
                 print(format_player_main_card(args.player, profile))
                 print()
                 print(format_player_matches(args.player, profile))
             else:
-                profiles = get_all_profiles(offline=args.offline)
+                profiles = get_all_profiles()
                 print(format_group_overview(profiles))
         except Exception as exc:  # noqa: BLE001
             print(f"Fehler beim Abrufen der Daten: {exc}")
