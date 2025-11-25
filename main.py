@@ -1,11 +1,13 @@
-import os
-import logging
-import re
+import argparse
 import asyncio
+import logging
+import os
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import requests
+from requests.exceptions import RequestException
 from bs4 import BeautifulSoup
 from telegram import (
     Update,
@@ -21,11 +23,7 @@ from telegram.ext import (
 
 # ===================== CONFIG =====================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID_ENV = os.getenv("CHAT_ID")  # aktuell nicht zwingend nötig
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN ist nicht gesetzt. Bitte als Environment Variable setzen.")
 
 # Deine drei Spieler
 FRIENDS: Dict[str, int] = {
@@ -85,20 +83,9 @@ def profile_url(player_id: int) -> str:
     return f"{AOE_BASE_URL}/user/{player_id}/"
 
 
-def scrape_player(player_id: int) -> PlayerProfile:
-    """
-    Holt das HTML der Profilseite und parst:
-    - Namen, Game Id
-    - Rankings (1v1 RM / Team RM)
-    - About-Text (Highlights)
-    - letzte Matches (modus, map, dauer, wann, match-id)
-    """
-    url = profile_url(player_id)
-    logger.info(f"Scrape {url}")
-    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-    resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "html.parser")
+def parse_player_html(html_text: str, player_id: int) -> PlayerProfile:
+    """Parst ein AoE2Insights-Profil-HTML in eine PlayerProfile-Struktur."""
+    soup = BeautifulSoup(html_text, "html.parser")
     full_text = soup.get_text(separator="\n")
 
     # Name und Game Id
@@ -240,6 +227,26 @@ def scrape_player(player_id: int) -> PlayerProfile:
         fav_role_line=fav_role_line,
         last_matches=last_matches,
     )
+
+
+def scrape_player(player_id: int) -> PlayerProfile:
+    """
+    Holt das HTML der Profilseite und parst:
+    - Namen, Game Id
+    - Rankings (1v1 RM / Team RM)
+    - About-Text (Highlights)
+    - letzte Matches (modus, map, dauer, wann, match-id)
+    """
+    url = profile_url(player_id)
+    logger.info(f"Scrape {url}")
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        resp.raise_for_status()
+    except RequestException as exc:
+        logger.error("Fehler beim Abruf von %s: %s", url, exc)
+        raise RuntimeError(f"Konnte {url} nicht laden: {exc}") from exc
+
+    return parse_player_html(resp.text, player_id)
 
 
 # ===================== FORMATTING =====================
@@ -482,6 +489,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     loop = asyncio.get_running_loop()
 
+    async def load_profile(name: str) -> Optional[PlayerProfile]:
+        try:
+            return await loop.run_in_executor(None, get_profile, name)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Fehler beim Laden von %s: %s", name, exc)
+            await query.edit_message_text(
+                "⚠️ Konnte die Spielerdaten momentan nicht laden. Bitte später erneut versuchen.",
+                reply_markup=start_keyboard(),
+            )
+            return None
+
     if data == "back_start":
         profiles = await loop.run_in_executor(None, get_all_profiles)
         text = format_group_overview(profiles)
@@ -508,7 +526,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if name not in FRIENDS:
             await query.edit_message_text("Unbekannter Spieler.", reply_markup=start_keyboard())
             return
-        profile = await loop.run_in_executor(None, get_profile, name)
+        profile = await load_profile(name)
+        if profile is None:
+            return
         text = format_player_main_card(name, profile)
         await query.edit_message_text(text, reply_markup=player_keyboard(name))
         return
@@ -518,7 +538,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if name not in FRIENDS:
             await query.edit_message_text("Unbekannter Spieler.", reply_markup=start_keyboard())
             return
-        profile = await loop.run_in_executor(None, get_profile, name)
+        profile = await load_profile(name)
+        if profile is None:
+            return
         text = format_player_matches(name, profile)
         await query.edit_message_text(text, reply_markup=player_keyboard(name))
         return
@@ -528,7 +550,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if name not in FRIENDS:
             await query.edit_message_text("Unbekannter Spieler.", reply_markup=start_keyboard())
             return
-        profile = await loop.run_in_executor(None, get_profile, name)
+        profile = await load_profile(name)
+        if profile is None:
+            return
         text = format_player_civs(name, profile)
         await query.edit_message_text(text, reply_markup=player_keyboard(name))
         return
@@ -537,7 +561,39 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ===================== MAIN =====================
 
 def main() -> None:
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    parser = argparse.ArgumentParser(description="AoE2 Insights Telegram Bot")
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Scrape und drucke die Übersicht in die Konsole (ohne Telegram)",
+    )
+    parser.add_argument(
+        "--player",
+        choices=list(FRIENDS.keys()),
+        help="Optional nur einen Spieler im CLI-Modus scrapen",
+    )
+    args = parser.parse_args()
+
+    if args.cli:
+        try:
+            if args.player:
+                profile = get_profile(args.player)
+                print(format_player_main_card(args.player, profile))
+                print()
+                print(format_player_matches(args.player, profile))
+            else:
+                profiles = get_all_profiles()
+                print(format_group_overview(profiles))
+        except Exception as exc:  # noqa: BLE001
+            print(f"Fehler beim Abrufen der Daten: {exc}")
+            raise SystemExit(1) from exc
+        return
+
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        raise RuntimeError("BOT_TOKEN ist nicht gesetzt. Bitte als Environment Variable setzen.")
+
+    app = ApplicationBuilder().token(bot_token).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("menu", menu_command))
